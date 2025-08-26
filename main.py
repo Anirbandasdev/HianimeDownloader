@@ -1,32 +1,63 @@
 import argparse
 import os
 import time
+import sys
 
-from colorama import Fore
+from colorama import Fore, init
 
 from extractors.general import GeneralExtractor
 from extractors.hianime import HianimeExtractor
 from extractors.instagram import InstagramExtractor
 
+# Try to import enhanced features, fallback if not available
+try:
+    from tools.config_manager import ConfigManager
+    from tools.user_interface import UserInterface
+    ENHANCED_FEATURES = True
+except ImportError:
+    ENHANCED_FEATURES = False
+
+# Initialize colorama
+init(autoreset=True)
 
 class Main:
     def __init__(self):
+        # Initialize enhanced features if available
+        if ENHANCED_FEATURES:
+            self.config_manager = ConfigManager()
+            self.config = self.config_manager.get_config()
+            self.ui = UserInterface()
+            self.ui.print_banner()
+        
         self.args = self.parse_args()
         extractor = self.get_extractor()
-        extractor.run()
+        
+        if extractor:
+            extractor.run()
+        else:
+            print(f"{Fore.LIGHTRED_EX}❌ Failed to initialize extractor")
 
     def get_extractor(self):
         if not self.args.link and not self.args.filename:
             os.system("cls" if os.name == "nt" else "clear")
-            ans = input(
-                f"{Fore.LIGHTGREEN_EX}GDown {Fore.LIGHTCYAN_EX}Downloader\n\nProvide a link or search for an anime:\n{Fore.LIGHTYELLOW_EX}"
-            )
+            
+            if ENHANCED_FEATURES:
+                self.ui.print_section_header("Welcome to GDown Downloader")
+                ans = input(
+                    f"{Fore.LIGHTCYAN_EX}🔍 Provide a link or search for an anime:\n{Fore.LIGHTYELLOW_EX}"
+                )
+            else:
+                ans = input(
+                    f"{Fore.LIGHTGREEN_EX}GDown {Fore.LIGHTCYAN_EX}Downloader\n\nProvide a link or search for an anime:\n{Fore.LIGHTYELLOW_EX}"
+                )
+            
             if "http" in ans.lower():
                 self.args.link = ans
             else:
                 return HianimeExtractor(args=self.args, name=ans)
 
         if not self.args.link and self.args.filename:
+            return HianimeExtractor(args=self.args, name=self.args.filename)
             return HianimeExtractor(args=self.args, name=self.args.filename)
 
         if "hianime" in self.args.link:

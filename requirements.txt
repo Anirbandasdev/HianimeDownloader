@@ -47,3 +47,8 @@ websocket-client==1.8.0
 wsproto==1.2.0
 yt-dlp==2025.5.22
 zstandard==0.23.0
+
+# Enhanced features dependencies
+aiohttp==3.9.1
+aiofiles==23.2.1
+tqdm==4.66.1
