@@ -49,7 +49,7 @@ class HianimeExtractor:
             "Accept-Language": "en-US,en;q=0.8",
             "Connection": "keep-alive",
         }
-        self.URL: str = "https://hianime.to"
+        self.URL: str = "https://hianime.nz"
         self.ENCODING = "utf-8"
         self.SUBTITLE_LANG: str = "en"
         self.OTHER_LANGS: list[str] = [
@@ -116,6 +116,82 @@ class HianimeExtractor:
         self.TITLE_TRANS: dict[int, Any] = str.maketrans(
             "", "", "".join(self.BAD_TITLE_CHARS)
         )
+
+    def make_request_with_retry(self, url: str, max_retries: int = 3, timeout: int = 30, delay: float = 2.0) -> requests.Response | None:
+        """
+        Make an HTTP GET request with retry logic and better error handling.
+        
+        Args:
+            url: The URL to request
+            max_retries: Maximum number of retry attempts
+            timeout: Request timeout in seconds
+            delay: Delay between retries in seconds
+            
+        Returns:
+            requests.Response object or None if all attempts failed
+        """
+        # Create a session with better configuration
+        session = requests.Session()
+        session.headers.update(self.HEADERS)
+        
+        # Add retry adapter
+        from urllib3.util.retry import Retry
+        retry_strategy = Retry(
+            total=max_retries,
+            backoff_factor=1,
+            status_forcelist=[429, 500, 502, 503, 504],
+        )
+        adapter = requests.adapters.HTTPAdapter(max_retries=retry_strategy)
+        session.mount("http://", adapter)
+        session.mount("https://", adapter)
+        
+        for attempt in range(max_retries + 1):
+            try:
+                print(f"Making request to: {url[:80]}{'...' if len(url) > 80 else ''}")
+                if attempt > 0:
+                    print(f"Retry attempt {attempt}/{max_retries}")
+                
+                response = session.get(
+                    url, 
+                    timeout=timeout,
+                    verify=False,  # Disable SSL verification if needed
+                    allow_redirects=True
+                )
+                response.raise_for_status()  # Raise an exception for bad status codes
+                return response
+                
+            except (requests.exceptions.ConnectionError, 
+                    requests.exceptions.Timeout,
+                    requests.exceptions.SSLError,
+                    ConnectionResetError) as e:
+                print(f"Network error (attempt {attempt + 1}/{max_retries + 1}): {type(e).__name__}: {e}")
+                
+                if attempt < max_retries:
+                    print(f"Waiting {delay} seconds before retry...")
+                    time.sleep(delay)
+                    delay *= 1.5  # Exponential backoff
+                else:
+                    print("All retry attempts failed. This may be due to:")
+                    print("1. Network connectivity issues")
+                    print("2. Website blocking requests")
+                    print("3. Firewall/antivirus blocking Python")
+                    print("4. VPN/proxy issues")
+                    return None
+                    
+            except requests.exceptions.HTTPError as e:
+                print(f"HTTP error: {e}")
+                return None
+            except Exception as e:
+                print(f"Unexpected error: {type(e).__name__}: {e}")
+                if attempt < max_retries:
+                    print(f"Waiting {delay} seconds before retry...")
+                    time.sleep(delay)
+                    delay *= 1.5
+                else:
+                    return None
+        
+        session.close()
+        return None
 
     def run(self):
         anime: Anime | None = (  # type: ignore
@@ -355,9 +431,23 @@ class HianimeExtractor:
         )
 
     def get_server_options(self, download_type: str) -> list[WebElement]:
-        WebDriverWait(self.driver, 10).until(
-            EC.presence_of_element_located((By.ID, "servers-content"))
-        )
+        try:
+            # Increased timeout and better waiting
+            WebDriverWait(self.driver, 30).until(
+                EC.presence_of_element_located((By.ID, "servers-content"))
+            )
+        except Exception as e:
+            print(f"Failed to find servers-content element: {e}")
+            print("Trying to refresh the page and wait...")
+            self.driver.refresh()
+            time.sleep(5)
+            try:
+                WebDriverWait(self.driver, 30).until(
+                    EC.presence_of_element_located((By.ID, "servers-content"))
+                )
+            except Exception as e2:
+                print(f"Failed again after refresh: {e2}")
+                raise e2
 
         options = [
             _type.find_element(By.CLASS_NAME, "ps__-list").find_elements(
@@ -486,20 +576,28 @@ class HianimeExtractor:
                     and "thumbnail" not in uri
                     and uri not in self.captured_subtitle_urls
                     and not any(lang in uri for lang in self.OTHER_LANGS)
-                    and detect_lang(
-                        requests.get(uri, headers=dict(request.headers)).content.decode(
-                            self.ENCODING
-                        )
-                    )
-                    == self.SUBTITLE_LANG
                 ):
-                    if uri in urls["all-vtt"]:
-                        previously_found_vtt += 1
-                        if previously_found_vtt >= len(urls["all-vtt"]):
-                            found_vtt = True
-                        continue
+                    # Try to fetch subtitle content with retry logic
+                    subtitle_content = None
+                    for retry_attempt in range(3):
+                        try:
+                            response = requests.get(uri, headers=dict(request.headers), timeout=10)
+                            response.raise_for_status()
+                            subtitle_content = response.content.decode(self.ENCODING)
+                            break
+                        except Exception as e:
+                            print(f"Failed to fetch subtitle (attempt {retry_attempt + 1}/3): {e}")
+                            if retry_attempt < 2:
+                                time.sleep(1)
+                    
+                    if subtitle_content and detect_lang(subtitle_content) == self.SUBTITLE_LANG:
+                        if uri in urls["all-vtt"]:
+                            previously_found_vtt += 1
+                            if previously_found_vtt >= len(urls["all-vtt"]):
+                                found_vtt = True
+                            continue
 
-                    urls["all-vtt"].append(uri)
+                        urls["all-vtt"].append(uri)
             attempt += 1
             if attempt in self.DOWNLOAD_REFRESH:
                 self.driver.refresh()
@@ -539,7 +637,27 @@ class HianimeExtractor:
 
     @staticmethod
     def look_for_variants(m3u8_url: str, m3u8_headers: dict[str, Any]) -> str:
-        response = requests.get(m3u8_url, headers=m3u8_headers)
+        # Retry logic for static method
+        for attempt in range(3):
+            try:
+                response = requests.get(m3u8_url, headers=m3u8_headers, timeout=30)
+                response.raise_for_status()
+                break
+            except (requests.exceptions.ConnectionError, 
+                    requests.exceptions.Timeout,
+                    requests.exceptions.SSLError,
+                    ConnectionResetError) as e:
+                print(f"Network error fetching m3u8 (attempt {attempt + 1}/3): {type(e).__name__}: {e}")
+                if attempt < 2:
+                    print("Waiting 2 seconds before retry...")
+                    time.sleep(2)
+                else:
+                    print("Failed to fetch m3u8 after 3 attempts")
+                    return m3u8_url  # Return original URL as fallback
+            except Exception as e:
+                print(f"Unexpected error fetching m3u8: {e}")
+                return m3u8_url
+        
         lines = response.text.splitlines()
         url = None
         for line in lines:
@@ -597,9 +715,12 @@ class HianimeExtractor:
 
         # GET ANIME ELEMENTS FROM PAGE
         url: str = urljoin(self.URL, "/search?keyword=" + search_name)
-        search_page_response: requests.Response = requests.get(
-            url, headers=self.HEADERS
-        )
+        search_page_response: requests.Response | None = self.make_request_with_retry(url)
+        
+        if not search_page_response:
+            print("Failed to fetch anime search results. Please check your internet connection or try again later.")
+            return None
+            
         search_page_soup: BeautifulSoup = BeautifulSoup(
             search_page_response.content, "html.parser"
         )
@@ -678,8 +799,13 @@ class HianimeExtractor:
             - 1
         ]
 
-    def get_anime_from_link(self, link: str) -> Anime:
-        link_page: requests.Response = requests.get(link, headers=self.HEADERS)
+    def get_anime_from_link(self, link: str) -> Anime | None:
+        link_page: requests.Response | None = self.make_request_with_retry(link)
+        
+        if not link_page:
+            print("Failed to fetch anime page from link. Please check your internet connection or try again later.")
+            return None
+            
         link_page_soup = BeautifulSoup(link_page.content, "html.parser")
         main_div: Tag = link_page_soup.find("div", "anisc-detail")  # type: ignore
         anime_stats: Tag = main_div.find("div", "film-stats")  # type: ignore
